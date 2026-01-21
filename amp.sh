@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2025 community-scripts ORG (Clone)
-# Author: Gemini
+# Copyright (c) 2025 community-scripts ORG (Ported for AMP)
+# Author: Gemini (Ported from bvdberg01)
 # License: MIT
+# Source: https://cubecoders.com/AMP
 
-# --- Variables ---
-APP="AMP-Game-Panel"
+# --- Application Settings ---
+APP="AMP"
 var_tags="gaming"
 var_cpu="2"
 var_ram="2048"
@@ -14,7 +15,7 @@ var_os="debian"
 var_version="12"
 var_unprivileged="1"
 
-# --- Styles ---
+# --- Styles & Colors ---
 YW=$(echo "\033[33m")
 BL=$(echo "\033[36m")
 RD=$(echo "\033[01;31m")
@@ -24,8 +25,8 @@ DGN=$(echo "\033[32m")
 CL=$(echo "\033[m")
 CM="${GN}✓${CL}"
 CROSS="${RD}✗${CL}"
-
-# --- Functions ---
+INFO="${YW}[INFO]${CL}"
+TAB="  "
 
 function header_info {
   clear
@@ -51,162 +52,160 @@ function msg_ok() {
   echo -e "${CM} ${msg}${CL}"
 }
 
-# 1. Get Next Free ID
-function get_next_id() {
-    local ID=100
-    while pct status $ID &>/dev/null || qm status $ID &>/dev/null; do
-        ID=$((ID+1))
-    done
-    echo $ID
+function msg_error() {
+  local msg="$1"
+  echo -e "${CROSS} ${msg}${CL}"
 }
 
-# 2. Get Valid Storage Pools
-function get_storage_list() {
-    # Returns a list formatted for whiptail: "ID" "Type (Free space)"
-    pvesm status -content rootdir | awk 'NR>1 {print $1, $2"("$6")"}'
-}
+# --- Infrastructure Functions (Replicating build.func) ---
 
-# --- Main Script ---
-
-if [ `id -u` -ne 0 ]; then
-    echo -e "${RD}This script must be run as root${CL}"
+function check_root() {
+  if [[ `id -u` -ne 0 ]]; then
+    msg_error "Must be run as root!"
     exit 1
-fi
+  fi
+}
 
-# Dependency check for whiptail
-if ! command -v whiptail &> /dev/null; then
-    echo "Installing whiptail..."
+function check_deps() {
+  if ! command -v whiptail &> /dev/null; then
+    msg_info "Installing whiptail (required for GUI)"
+    apt-get update >/dev/null 2>&1
     apt-get install -y whiptail >/dev/null 2>&1
-fi
+    msg_ok "Installed whiptail"
+  fi
+}
 
-header_info
+function get_next_vmid() {
+  local ID=100
+  while pct status $ID &>/dev/null || qm status $ID &>/dev/null; do
+    ID=$((ID+1))
+  done
+  echo $ID
+}
 
-# Initialize Defaults
-CTID=$(get_next_id)
-HOSTNAME="amp-panel"
-STORAGE="local-lvm"
-MAC_ADDR=""
-BRIDGE="vmbr0"
-NET_IP="dhcp"
-GATEWAY=""
+function variables() {
+  CTID=$(get_next_vmid)
+  HOSTNAME="amp-panel"
+  STORAGE="local-lvm"
+  MAC=""
+  BRIDGE="vmbr0"
+  NET="dhcp"
+  GATEWAY=""
+  VLAN=""
+  MTU=""
 
-# --- TUI: Standard vs Advanced ---
-if (whiptail --title "AMP Installation" --yesno "This will create a new LXC for AMP.\n\nDefault Settings:\nCT ID: $CTID\nCPU: $var_cpu\nRAM: $var_ram MB\nDisk: $var_disk GB\nStorage: Auto\n\nProceed with defaults?" 12 58); then
-    # User chose YES - Defaults
-    ADVANCED=false
-else
-    # User chose NO - Advanced
-    ADVANCED=true
-fi
-
-# --- TUI: Advanced Settings ---
-if [ "$ADVANCED" = true ]; then
-    # 1. Container ID
-    CTID=$(whiptail --inputbox "Set Container ID" 8 58 $CTID --title "Container ID" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-
+  # The "Default vs Advanced" Menu
+  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "Settings" --yesno "This will create a new LXC for ${APP}.\n\nDefault Settings:\nCT ID: $CTID\nCPU: ${var_cpu}\nRAM: ${var_ram}MB\nDisk: ${var_disk}GB\n\nProceed with defaults?" 14 58); then
+    # User chose Default (Yes)
+    return
+  else
+    # User chose Advanced (No) - Open the full menu
+    
+    # 1. CT ID
+    CTID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Container ID" 8 58 $CTID --title "Container ID" 3>&1 1>&2 2>&3) || exit
+    
     # 2. Hostname
-    HOSTNAME=$(whiptail --inputbox "Set Hostname" 8 58 "amp-panel" --title "Hostname" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-
-    # 3. CPU
-    var_cpu=$(whiptail --inputbox "CPU Cores" 8 58 "$var_cpu" --title "CPU Cores" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-
-    # 4. RAM
-    var_ram=$(whiptail --inputbox "RAM (MB)" 8 58 "$var_ram" --title "RAM Size" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-
-    # 5. Disk Size
-    var_disk=$(whiptail --inputbox "Disk Size (GB)" 8 58 "$var_disk" --title "Disk Size" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-
-    # 6. Storage Selection
-    STORAGE_LIST=$(get_storage_list)
-    # Using eval to handle the spaces in the storage list correctly for whiptail
-    STORAGE=$(eval whiptail --menu \"Select Storage Pool\" 15 60 5 $STORAGE_LIST 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-
-    # 7. Bridge
-    BRIDGE=$(whiptail --inputbox "Bridge Interface" 8 58 "vmbr0" --title "Network Bridge" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-
-    # 8. IP Address
-    NET_IP=$(whiptail --inputbox "IPv4 Address (dhcp or CIDR e.g. 192.168.1.5/24)" 8 58 "dhcp" --title "IP Address" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-
-    # 9. Gateway (only if not DHCP)
-    if [ "$NET_IP" != "dhcp" ]; then
-        GATEWAY=$(whiptail --inputbox "Gateway IP" 8 58 "" --title "Gateway" 3>&1 1>&2 2>&3)
-        if [ $? -ne 0 ]; then exit; fi
+    HOSTNAME=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 $HOSTNAME --title "Hostname" 3>&1 1>&2 2>&3) || exit
+    
+    # 3. Resources
+    var_cpu=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "CPU Cores" 8 58 $var_cpu --title "CPU" 3>&1 1>&2 2>&3) || exit
+    var_ram=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "RAM (MB)" 8 58 $var_ram --title "RAM" 3>&1 1>&2 2>&3) || exit
+    var_disk=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Disk Size (GB)" 8 58 $var_disk --title "Disk" 3>&1 1>&2 2>&3) || exit
+    
+    # 4. Storage (Dynamic List)
+    STORAGE_MENU=$(pvesm status -content rootdir | awk 'NR>1 {print $1, $2 " (" $4 "/" $5 ")"}' | tr '\n' ' ')
+    STORAGE=$(eval whiptail --backtitle "Proxmox VE Helper Scripts" --menu \"Select Storage Pool\" 15 60 5 $STORAGE_MENU 3>&1 1>&2 2>&3) || exit
+    
+    # 5. Network
+    BRIDGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Bridge" 8 58 $BRIDGE --title "Bridge" 3>&1 1>&2 2>&3) || exit
+    NET=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "IPv4 (dhcp or CIDR)" 8 58 $NET --title "IP Address" 3>&1 1>&2 2>&3) || exit
+    
+    if [ "$NET" != "dhcp" ]; then
+      GATEWAY=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Gateway IP" 8 58 "" --title "Gateway" 3>&1 1>&2 2>&3) || exit
     fi
+    
+    # 6. MAC Address (For your filtering)
+    MAC=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "MAC Address (Leave empty for random)" 8 58 "" --title "MAC Address" 3>&1 1>&2 2>&3) || exit
+    
+    # 7. VLAN
+    VLAN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "VLAN Tag (Leave empty for none)" 8 58 "" --title "VLAN" 3>&1 1>&2 2>&3) || exit
+  fi
+}
 
-    # 10. MAC Address (Crucial for you)
-    MAC_ADDR=$(whiptail --inputbox "MAC Address (Leave empty for random)" 8 58 "" --title "MAC Filtering" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then exit; fi
-fi
+function build_container() {
+  msg_info "Updating Template Cache"
+  pveam update >/dev/null
+  msg_ok "Template Cache Updated"
 
-# --- Summary ---
-header_info
-echo -e "${DGN}Creating Container with settings:${CL}"
-echo -e "ID: ${CTID} | Hostname: ${HOSTNAME}"
-echo -e "CPU: ${var_cpu} | RAM: ${var_ram} | Disk: ${var_disk}G | Storage: ${STORAGE}"
-if [ ! -z "$MAC_ADDR" ]; then echo -e "MAC: ${MAC_ADDR}"; fi
-echo -e "-------------------------------------"
-
-# --- Installation ---
-
-# 1. Update Templates
-msg_info "Updating Template Cache"
-pveam update >/dev/null
-msg_ok "Template Cache Updated"
-
-# 2. Check/Download Debian 12
-TEMPLATE="local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
-if ! pveam list local | grep -q "debian-12-standard"; then
+  TEMPLATE_SEARCH="debian-12-standard"
+  msg_info "Checking for Debian 12 Template"
+  TEMPLATE=$(pveam list local | grep "$TEMPLATE_SEARCH" | sort | tail -n 1 | awk '{print $1}')
+  
+  if [ -z "$TEMPLATE" ]; then
     msg_info "Downloading Debian 12 Template"
     pveam download local debian-12-standard_12.7-1_amd64.tar.zst >/dev/null
-fi
+    TEMPLATE="local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+  fi
+  msg_ok "Template Ready"
 
-# 3. Construct Network String
-NET_STRING="name=eth0,bridge=${BRIDGE},type=veth"
-if [ ! -z "$MAC_ADDR" ]; then NET_STRING="${NET_STRING},hwaddr=${MAC_ADDR}"; fi
-if [ "$NET_IP" == "dhcp" ]; then
+  # Build Network String
+  NET_STRING="name=eth0,bridge=${BRIDGE},type=veth"
+  if [ ! -z "$MAC" ]; then NET_STRING="${NET_STRING},hwaddr=${MAC}"; fi
+  if [ "$NET" == "dhcp" ]; then
     NET_STRING="${NET_STRING},ip=dhcp"
-else
-    NET_STRING="${NET_STRING},ip=${NET_IP},gw=${GATEWAY}"
-fi
+  else
+    NET_STRING="${NET_STRING},ip=${NET},gw=${GATEWAY}"
+  fi
+  if [ ! -z "$VLAN" ]; then NET_STRING="${NET_STRING},tag=${VLAN}"; fi
 
-# 4. Create Container
-msg_info "Creating Container $CTID"
-pct create $CTID $TEMPLATE -hostname $HOSTNAME -cores $var_cpu -memory $var_ram -swap 512 -storage $STORAGE -net0 "$NET_STRING" -features nesting=1 -unprivileged $var_unprivileged >/dev/null
-pct resize $CTID rootfs ${var_disk}G >/dev/null
-msg_ok "Container Created"
+  msg_info "Creating Container $CTID ($HOSTNAME)"
+  pct create $CTID $TEMPLATE -hostname $HOSTNAME -cores $var_cpu -memory $var_ram -swap 512 -storage $STORAGE -net0 "$NET_STRING" -features nesting=1 -unprivileged $var_unprivileged >/dev/null
+  pct resize $CTID rootfs ${var_disk}G >/dev/null
+  msg_ok "Container Created"
 
-# 5. Start Container
-msg_info "Starting Container"
-pct start $CTID
-msg_ok "Container Started"
+  msg_info "Starting Container"
+  pct start $CTID
+  msg_ok "Container Started"
+  
+  msg_info "Waiting for Container to Initialize"
+  sleep 5 # Give it a moment for IP and network
+  msg_ok "Container Online"
+}
 
-# 6. Install Dependencies
-msg_info "Installing Dependencies"
-sleep 4 # Allow network up
-pct exec $CTID -- bash -c "apt-get update && apt-get install -y wget curl git gnupg software-properties-common dirmngr ca-certificates apt-transport-https procps unzip socat" >/dev/null 2>&1
-msg_ok "Dependencies Installed"
+function install_script() {
+  msg_info "Installing Dependencies (curl, git, java, deps)"
+  pct exec $CTID -- bash -c "apt-get update >/dev/null 2>&1 && apt-get install -y wget curl git gnupg software-properties-common dirmngr ca-certificates apt-transport-https procps unzip socat" >/dev/null 2>&1
+  msg_ok "Dependencies Installed"
 
-# 7. Install AMP (Silent Mode)
-msg_info "Installing AMP Backend"
-pct exec $CTID -- bash -c "wget -q https://repo.cubecoders.com/archive.key -O /usr/share/keyrings/repo.cubecoders.com.gpg"
-pct exec $CTID -- bash -c "echo 'deb [signed-by=/usr/share/keyrings/repo.cubecoders.com.gpg] https://repo.cubecoders.com/ debian/' > /etc/apt/sources.list.d/amp.list"
-pct exec $CTID -- bash -c "apt-get update && apt-get install -y ampinstmgr" >/dev/null 2>&1
-msg_ok "AMP Backend Installed"
+  msg_info "Adding CubeCoders Repository"
+  pct exec $CTID -- bash -c "wget -q https://repo.cubecoders.com/archive.key -O /usr/share/keyrings/repo.cubecoders.com.gpg"
+  pct exec $CTID -- bash -c "echo 'deb [signed-by=/usr/share/keyrings/repo.cubecoders.com.gpg] https://repo.cubecoders.com/ debian/' > /etc/apt/sources.list.d/amp.list"
+  pct exec $CTID -- bash -c "apt-get update" >/dev/null 2>&1
+  msg_ok "Repository Added"
 
-# 8. Final Message
+  msg_info "Installing AMP Manager"
+  pct exec $CTID -- bash -c "apt-get install -y ampinstmgr" >/dev/null 2>&1
+  msg_ok "AMP Manager Installed"
+}
+
+# --- Main Execution ---
+
+check_root
+check_deps
+header_info
+variables
+build_container
+install_script
+
+# --- Final Output ---
 IP=$(pct exec $CTID ip a s dev eth0 | awk '/inet / {print $2}' | cut -d/ -f1)
 
-echo -e "\n${GN}Installation Complete!${CL}"
-echo -e "${DGN}To finish setup, please run the interactive wizard inside the container:${CL}"
-echo -e "1. ${BGN}pct enter $CTID${CL}"
-echo -e "2. ${BGN}su -l amp -c 'ampinstmgr quickstart'${CL}"
-echo ""
-echo -e "${INFO}${YW} Access URL: ${BGN}http://${IP}:8080${CL}"
+msg_ok "Completed Successfully!\n"
+echo -e "${GN}${APP} setup has been initialized!${CL}"
+echo -e "${INFO}${YW} To finish the setup, you must run the wizard manually:${CL}"
+echo -e "  1. Enter the container:  ${BGN}pct enter $CTID${CL}"
+echo -e "  2. Switch to 'amp' user: ${BGN}su -l amp${CL}"
+echo -e "  3. Run the wizard:       ${BGN}ampinstmgr quickstart${CL}"
+echo -e ""
+echo -e "${INFO}${YW} Access it using the following URL:${CL}"
+echo -e "${TAB}${BGN}http://${IP}:8080${CL}"
