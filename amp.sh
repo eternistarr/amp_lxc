@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2025 community-scripts ORG (Clone)
+# Copyright (c) 2025 community-scripts ORG (Final Fix)
 # Author: Gemini
 # License: MIT
 # Source: https://cubecoders.com/AMP
@@ -34,6 +34,7 @@ fi
 
 function msg_info() { echo -ne " ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${CM} $1${CL}"; }
+function msg_error() { echo -e "${CROSS} $1${CL}"; exit 1; }
 
 # Find next free Container ID
 function get_next_vmid() {
@@ -62,7 +63,7 @@ IP_ADDR="dhcp"
 GATEWAY=""
 
 # Mode Selection
-if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "Settings" --yesno "Use Default Settings?\n\nID: $CT_ID\nRAM: ${RAM_SIZE}MB\nDisk: ${DISK_SIZE}GB\nStorage: Auto-Detect (local-lvm)" 14 58); then
+if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "Settings" --yesno "Use Default Settings?\n\nID: $CT_ID\nRAM: ${RAM_SIZE}MB\nDisk: ${DISK_SIZE}GB\nStorage: Auto-Detect ($STORAGE)" 14 58); then
     MODE="Default"
 else
     MODE="Advanced"
@@ -82,10 +83,18 @@ if [ "$MODE" == "Advanced" ]; then
     # 4. RAM
     RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocated RAM (MB)" 8 58 $RAM_SIZE --title "RAM Resources" 3>&1 1>&2 2>&3) || exit
 
-    # 5. Storage (Dynamic Scanning)
-    # This scans your Proxmox storage and creates a menu list
-    STORAGE_MENU=$(pvesm status -content rootdir | awk 'NR>1 {print $1, $2 " (" $4 "/" $5 ")"}' | tr '\n' ' ')
-    STORAGE=$(eval whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pool" --menu \"Select Storage Location\" 15 60 5 $STORAGE_MENU 3>&1 1>&2 2>&3) || exit
+    # 5. Storage (Robust Selection)
+    # Build array of available storage that supports 'rootdir' (containers)
+    STORAGE_MENU=()
+    while read -r storage type total used free percent; do
+        # Skip the header row
+        if [[ "$storage" != "Name" ]]; then
+            STORAGE_MENU+=("$storage" "$free Free")
+        fi
+    done < <(pvesm status -content rootdir)
+
+    # Display Menu
+    STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pool" --menu "Select Storage Location" 15 60 5 "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3) || exit
 
     # 6. Disk Size
     DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Disk Size (GB)" 8 58 $DISK_SIZE --title "Disk Size" 3>&1 1>&2 2>&3) || exit
@@ -131,21 +140,30 @@ else
     NET_STRING="${NET_STRING},ip=${IP_ADDR},gw=${GATEWAY}"
 fi
 
-# Create Container
-msg_info "Creating Container $CT_ID"
-pct create $CT_ID $TEMPLATE -hostname $HOSTNAME -cores $CPU_CORES -memory $RAM_SIZE -swap 512 -storage $STORAGE -net0 "$NET_STRING" -features nesting=1 -unprivileged 1 >/dev/null
+# Create Container with Error Checking
+msg_info "Creating Container $CT_ID on $STORAGE"
+pct create $CT_ID $TEMPLATE -hostname $HOSTNAME -cores $CPU_CORES -memory $RAM_SIZE -swap 512 -storage $STORAGE -net0 "$NET_STRING" -features nesting=1 -unprivileged 1 >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+    msg_error "Failed to create container! Check if ID is free or Storage is valid."
+fi
 pct resize $CT_ID rootfs ${DISK_SIZE}G >/dev/null
 msg_ok "Container Created"
 
 # Start Container
 msg_info "Starting Container"
 pct start $CT_ID
+if [ $? -ne 0 ]; then
+    msg_error "Failed to start container!"
+fi
 msg_ok "Container Started"
 
 # Dependencies
 msg_info "Installing Dependencies"
 sleep 4 # Wait for network
 pct exec $CT_ID -- bash -c "apt-get update && apt-get install -y wget curl git gnupg software-properties-common dirmngr ca-certificates apt-transport-https procps unzip socat" >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+    msg_error "Failed to install dependencies (Network Error?)"
+fi
 msg_ok "Dependencies Installed"
 
 # Install AMP Backend (Silent)
